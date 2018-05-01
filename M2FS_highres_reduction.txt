@@ -1,0 +1,65 @@
+Notes on the reduction of highres m2fs data. 
+
+bc1 ccd has a bad pixel column after sep14 data, correct using badpix mask
+
+
+-Changes to reduction procedure for low resolution data
+All program changed have my initial infront, th_orginalname.pro
+
+-Steps taken in reduction procedure:
+
+1. run first point of th_m2fs_reduce.pro, first with run1=1, run2=0 
+
+This combines images from the four amplifiers and do the bias subtraction
+using the overscan region. 
+
+bxxx.fits blue 4 amplifiers merged 
+
+2 make master dark image using mdark.pro and run th_m2fs_reduce.pro with
+run1=0 and run2=1 to subtract dark current
+
+3. Combine twillight and quartz flats using th_m2fs_mflat.pro 
+
+4. remove cosmic from science frames with th_m2fs_crbye 
+   do not use more than three science frames for each run, to make cosmic ray removal most efficeint
+
+5. trace orders on CCD with th_m2fs_trace.pro  
+
+Check trace with atv, for half orders the trace can be bad
+
+
+6. flat correct science frames with th_m2fs_flat.pro
+
+
+7. combine science frames from the same night with th_m2fs_imcombine.pro
+
+
+8. use iraf (apfind, aptrace, apall and identify) to extract middle 4
+orders on one of the blue and red ThAr frames and find wavelenght
+solution. Create list of pixel and lambda values for each of the four orders,
+
+
+9. run th_m2fs_wave_mpfit.pro -this uses mpfit to fit an lengdre polynimial to
+the pixel and wavelength values, based on a cross correlation with the order
+examined in iraf. This program extract middle four order and crosscorrelate
+these with the rest, to finde offset, this is then used to find wavelength 
+solution using the output from identify.
+
+
+change pixel-lambda list for the four order and the 'template' set of orders
+to the right order nr. in the beginning of the program. 
+
+
+10. remove sky with th_m2fs_skysub.pro
+
+identify sky fibers in red and blue CCD, create skyfib list 
+
+
+11. extract spectra with th_m2fs_extract.pro 
+Set name of spectra in bottom of file.
+Extracts each order into a single spectrum.
+
+
+
+
+

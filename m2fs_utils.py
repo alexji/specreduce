@@ -44,7 +44,7 @@ def m2fs_load_files_two(fnames):
         headers.append(h)
     return imgarr, imgerrarr, headers
 
-def gaussfit(xdata, ydata, p0):
+def gaussfit(xdata, ydata, p0, **kwargs):
     """
     p0 = (amplitude, mean, sigma) (bias; linear; quadratic)
     """
@@ -68,7 +68,7 @@ def gaussfit(xdata, ydata, p0):
     else:
         raise ValueError("p0 must be 3-6 terms long, {}".format(p0))
         
-    popt, pcov = optimize.curve_fit(func, xdata, ydata, p0)
+    popt, pcov = optimize.curve_fit(func, xdata, ydata, p0, **kwargs)
     return popt
     #fit=gaussfit(auxx, auxy, coef, NTERMS=4, ESTIMATES=[auxdata[peak1[i]], peak1[i], 2, thresh/2.])
     

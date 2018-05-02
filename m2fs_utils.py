@@ -3,6 +3,7 @@ from __future__ import (division, print_function, absolute_import,
 
 import numpy as np
 from astropy.io import fits
+from scipy import optimize
 
 def mrdfits(fname, ext):
     """ Read fits file """
@@ -13,18 +14,64 @@ def mrdfits(fname, ext):
     return data, header
 
 def write_fits_two(outfname,d1,d2,h):
-    hdu1 = fits.PrimaryHDU(d1, h)
-    hdu2 = fits.ImageHDU(d2)
+    """ Write fits files with two arrays """
+    hdu1 = fits.PrimaryHDU(d1.T, h)
+    hdu2 = fits.ImageHDU(d2.T)
     hdulist = fits.HDUList([hdu1, hdu2])
     hdulist.writeto(outfname, overwrite=True)
 
 def read_fits_two(fname):
+    """ Read fits files with two arrays """
     with fits.open(fname) as hdulist:
         assert len(hdulist)==2
         header = hdulist[0].header
         d1 = hdulist[0].data.T
         d2 = hdulist[1].data.T
     return d1, d2, header
+
+def m2fs_load_files_two(fnames):
+    """ Create arrays of data from multiple fnames """
+    assert len(fnames) >= 1, fnames
+    N = len(fnames)
+    img, h = mrdfits(fnames[0],0)
+    Nx, Ny = img.shape
+    
+    headers = []
+    imgarr = np.empty((N, Nx, Ny))
+    imgerrarr = np.empty((N, Nx, Ny))
+    for k, fname in enumerate(fnames):
+        imgarr[k], imgerrarr[k], h = read_fits_two(fname)
+        headers.append(h)
+    return imgarr, imgerrarr, headers
+
+def gaussfit(xdata, ydata, p0):
+    """
+    p0 = (amplitude, mean, sigma) (bias; linear; quadratic)
+    """
+    NTERMS = len(p0)
+    if NTERMS == 3:
+        def func(x, *theta):
+            z = (x-theta[1])/theta[2]
+            return theta[0] * np.exp(-z**2/2.)
+    elif NTERMS == 4:
+        def func(x, *theta):
+            z = (x-theta[1])/theta[2]
+            return theta[0] * np.exp(-z**2/2.) + theta[3]
+    elif NTERMS == 5:
+        def func(x, *theta):
+            z = (x-theta[1])/theta[2]
+            return theta[0] * np.exp(-z**2/2.) + theta[3] + theta[4]*x
+    elif NTERMS == 6:
+        def func(x, *theta):
+            z = (x-theta[1])/theta[2]
+            return theta[0] * np.exp(-z**2/2.) + theta[3] + theta[4]*x + theta[5]*x**2
+    else:
+        raise ValueError("p0 must be 3-6 terms long, {}".format(p0))
+        
+    popt, pcov = optimize.curve_fit(func, xdata, ydata, p0)
+    return popt
+    #fit=gaussfit(auxx, auxy, coef, NTERMS=4, ESTIMATES=[auxdata[peak1[i]], peak1[i], 2, thresh/2.])
+    
 
 def m2fs_biassubtract(ime, h):
     """
@@ -225,9 +272,10 @@ def m2fs_4amp(infile):
     h1.add_history('m2fs_biassubtract: Subtracted bias on a per column basis')
     h1.add_history('m2fs_4amp: Merged 4 amplifiers into single frame')
 
-    ## when writing, don't have to flip the array
+    ## when writing, flip the array here (gets unflipped in write_fits_two)
+    ## This keeps conventions in a way that makes sense later.
     #hdu1 = fits.PrimaryHDU(outim, h1)
     #hdu2 = fits.ImageHDU(outerr)
     #hdulist = fits.HDUList([hdu1, hdu2])
     #hdulist.writeto(outfile, overwrite=True)
-    write_fits_two(outfile, outim, outerr, h1)
+    write_fits_two(outfile, outim.T, outerr.T, h1)

@@ -44,6 +44,39 @@ def m2fs_load_files_two(fnames):
         headers.append(h)
     return imgarr, imgerrarr, headers
 
+def m2fs_extract1d(data, tracecoef, id, yaper=7, method="sum"):
+    nx = data.shape[0]
+    ypeak = np.polyval(tracecoef[id], np.arange(nx))
+    spec1d = np.zeros(nx)
+    outerror = np.zeros(nx)
+    vround = np.vectorize(lambda x: int(round(x)))
+    ix1s = vround(ypeak) - int(yaper/2.)
+    ix2s = ix1s + yaper
+    for j in range(nx):
+        flux = data[j,ix1s[j]:ix2s[j]]
+        if method == "sum":
+            try:
+                spec1d[j] = np.nansum(flux)
+            except:
+                spec1d[j] = np.nan
+        else:
+            raise NotImplementedError
+    return spec1d
+
+def jds_poly_reject(x,y,ndeg,nsig_lower,nsig_upper,niter=5):
+    good = np.ones(len(x), dtype=bool)
+    w = np.arange(len(x))
+    for i in range(niter):
+        coeff = np.polyfit(x[w], y[w], ndeg)
+        res = y[w] - np.polyval(coeff, x[w])
+        sig = np.std(res)
+        good[w] = good[w] * (((res >= 0) & (res <= nsig_upper*sig)) | \
+                             ((res < 0)  & (res >= -1*nsig_lower*sig)))
+        w = np.where(good)[0]
+    coeff = np.polyfit(x[w], y[w], ndeg)
+    yfit = np.polyval(coeff, x[w])
+    return yfit, coeff
+
 def gaussfit(xdata, ydata, p0, **kwargs):
     """
     p0 = (amplitude, mean, sigma) (bias; linear; quadratic)

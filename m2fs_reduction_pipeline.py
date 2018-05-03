@@ -4,6 +4,7 @@ from __future__ import (division, print_function, absolute_import,
 import numpy as np
 import glob, os, sys, time
 
+from scipy import optimize, signal, ndimage, special, linalg
 from astropy.io import fits
 
 from m2fs_utils import mrdfits, read_fits_two, write_fits_two, m2fs_load_files_two
@@ -264,7 +265,133 @@ def m2fs_trace_orders(fname, expected_fibers,
                     dpi=300,bbox_inches="tight")
         plt.close(fig)
     
-#def m2fs_get_profiles():            
+def m2fs_ghlb_profile(fname, tracefname, tracestdfname, fibermapfname,
+                      x_begin, x_end,
+                      dy=5, legorder=6, ghorder=10,
+                      make_plot=True):
+    """ Use the same dy as in m2fs_trace_orders """
+    Nleg = legorder + 1
+    Ngh = ghorder + 1
+
+    outdir = os.path.dirname(fname)
+    outname = os.path.basename(fname)[:-5]
+    fname_fitparams = os.path.join(outdir,outname+"_ghlb_fitparams.txt")
+    fname_allyarr = os.path.join(outdir,outname+"_ghlb_yarr.npy")
+    fname_alldatarr = os.path.join(outdir,outname+"_ghlb_data.npy")
+    fname_allerrarr = os.path.join(outdir,outname+"_ghlb_errs.npy")
+
+    Nparam=Nleg*Ngh
+    
+    data, edata, header = read_fits_two(fname)
+    nx, ny = data.shape
+    coeffcen = np.loadtxt(tracefname)
+    coeffstd = np.loadtxt(tracestdfname)
+    fibmap = np.loadtxt(fibermapfname)
+    npeak, norder = len(coeffcen), fibmap.shape[1]
+    # Generate valid pixels: could do this in a more refined way
+    xarrlist = [np.arange(nx) for i in range(norder)]
+    xarrlist[0] = np.arange(nx-x_begin)+x_begin
+    xarrlist[-1] = np.arange(x_end)
+    
+    ## SECOND TRACE:
+    # For each order, fit spatial profile to the full trace simultaneously
+    # Following Kelson ghlb.pdf
+    # But fitting each fiber separately in some specified extraction region
+    
+    # Go 1 pixel further on each side, ensure an odd number
+    Nextract = int(dy)+4 + int(int(dy) % 2 == 0)
+    dextract = int(Nextract/2.)
+    vround = np.vectorize(lambda x: int(round(x)))
+    start = time.time()
+    # Outputs
+    allyarr = np.zeros((npeak,Nextract,nx))
+    fitparams = np.zeros((npeak,Nleg*Ngh))
+    alldatarr = np.full((npeak,nx,Nextract), np.nan)
+    allerrarr = np.full((npeak,nx,Nextract), np.nan)
+    # Plotting saves
+    allfitarr = np.full((npeak,nx,Nextract), np.nan)
+    for ipeak in range(npeak):
+        # Initialize peak locations, widths, and data arrays
+        xarr = xarrlist[ipeak % norder]
+        Nxarr = len(xarr)
+        Nxy = Nxarr*Nextract
+        
+        ypeak = np.polyval(coeffcen[ipeak],xarr)
+        ystdv = np.polyval(coeffstd[ipeak],xarr)
+        assert np.all(ystdv > 0)
+        assert np.all(ystdv > 0)
+        intypeak = vround(ypeak)
+        intymin = intypeak - dextract
+        intymax = intypeak + dextract + 1
+        yarr = np.array([np.arange(intymin[j],intymax[j]) for j in range(Nxarr)])
+        allyarr[ipeak,:,xarr] = yarr
+        
+        # Grab the relevant data into a flat array for fitting
+        datarr = np.zeros((Nxarr,Nextract))
+        errarr = np.zeros((Nxarr,Nextract))
+        for j,jx in enumerate(xarr):
+            datarr[j,:] =  data[jx,intymin[j]:intymax[j]]
+            errarr[j,:] = edata[jx,intymin[j]:intymax[j]]
+        assert np.all(errarr > 0), (errarr <= 0).sum()
+        alldatarr[ipeak,xarr,:] = datarr
+        allerrarr[ipeak,xarr,:] = errarr
+        # Apply simple estimate of spectrum flux: sum everything
+        specestimate = np.sum(datarr, axis=1)
+        
+        # Set up the polynomial grid in xl and ys
+        ys = (yarr.T-ypeak)/ystdv
+        expys = np.exp(-ys**2/2.)
+        xl = (xarr-np.mean(xarr))/(Nxarr/2.)
+        polygrid = np.zeros((Nxarr,Nextract,Nleg,Ngh))
+        La = [special.eval_legendre(a,xl)*specestimate for a in range(Nleg)]
+        GHb = [special.eval_hermitenorm(b,ys)*expys for b in range(Ngh)]
+        for a in range(Nleg):
+            for b in range(Ngh):
+                polygrid[:,:,a,b] = (GHb[b]*La[a]).T
+        polygrid = np.reshape(polygrid,(Nxy,Nparam))
+        
+        # this is a *linear* least squares fit!
+        Xarr = np.reshape(polygrid,(Nxy,Nparam))
+        Yarr = np.ravel(datarr)
+        # use errors as weights. note that we don't square it, the squaring happens later
+        warr = np.ravel(errarr)**-1
+        wXarr = (Xarr.T*warr).T
+        wYarr = warr*Yarr
+        pfit, residues, rank, svals = linalg.lstsq(wXarr, wYarr)
+        fitparams[ipeak] = pfit
+        fity = pfit.dot(Xarr.T).reshape(Nxarr,Nextract)
+        allfitarr[ipeak][xarr,:] = fity
+    print("Total took {:.1f}s".format(time.time()-start))
+    np.savetxt(fname_fitparams,fitparams)
+    np.save(fname_allyarr,allyarr)
+    np.save(fname_alldatarr,alldatarr)
+    np.save(fname_allerrarr,allerrarr)
+
+    if make_plot:
+        import matplotlib.pyplot as plt
+        Nrow, Ncol = fibmap.shape
+        fig1, axes1 = plt.subplots(Nrow,Ncol,figsize = (Ncol*6,Nrow*2.5))
+        fig2, axes2 = plt.subplots(Nrow,Ncol,figsize = (Ncol*6,Nrow*2.5))
+        fig3, axes3 = plt.subplots(Nrow,Ncol,figsize = (Ncol*6,Nrow*2.5))
+        fig4, axes4 = plt.subplots(Nrow,Ncol,figsize = (Ncol*6,Nrow*2.5))
+        zplot = np.linspace(-6,6)
+        normz = np.exp(-0.5*zplot**2)/(2*np.sqrt(np.pi))
+        vmax3 = np.nanpercentile(alldatarr,[99.9])[0]
+        vmin4 = np.nanpercentile(allerrarr,[10])[0]
+        vmax4 = np.nanpercentile(allerrarr,[90])[0]
+        for ipeak, (ax1,ax2,ax3,ax4) in enumerate(zip(axes1.flat,axes2.flat,axes3.flat,axes4.flat)):
+            z = (alldatarr[ipeak].T-allfitarr[ipeak].T)/allerrarr[ipeak].T
+            im = ax1.imshow(z, origin='lower', aspect='auto',vmin=-6,vmax=6)
+            ax2.hist(np.ravel(z[np.isfinite(z)]),bins=zplot,normed=True)
+            ax2.plot(zplot,normz,lw=.5)
+            im = ax3.imshow(alldatarr[ipeak].T, origin='lower', aspect='auto',vmin=0,vmax=vmax3)
+            im = ax4.imshow(alldatarr[ipeak].T, origin='lower', aspect='auto',vmin=vmin4,vmax=vmax4)
+        outpre = outdir+"/"+outname
+        fig1.savefig(outpre+"_ghlbresid_zimg.png",bbox_inches='tight')
+        fig2.savefig(outpre+"_ghlbresid_hist.png",bbox_inches='tight')
+        fig3.savefig(outpre+"_ghlbresid_img.png",bbox_inches='tight')
+        fig4.savefig(outpre+"_ghlbresid_err.png",bbox_inches='tight')
+        plt.close(fig1); plt.close(fig2); plt.close(fig3); plt.close(fig4)
 
 def m2fs_flat(scifnames, flatfname, tracefname, fibermapfname,
               yaper = 7, x_begin=900, x_end=1300):

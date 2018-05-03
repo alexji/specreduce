@@ -76,12 +76,16 @@ if __name__ == "__main__":
     n1_scinum = [1419,1420,1424,1427,1428,1431,1432]
     n2_scinum = [1570,1571,1574,1575,1578,1579,1582,1583]
     scinums = n1_scinum + n2_scinum
-
+    longarcnums = [1412,1415,1421,1429,1433,1566,1572,1576,1580,1584]
+    shortarcnums = [1413,1416,1422,1430,1434,1567,1573,1577,1581,1585]
+        
     darks = ["{}/{}{:04}.fits".format(rwd,rb,i) for i in darknums]
     flats = ["{}/{}{:04}d.fits".format(twd,rb,i) for i in flatnums]
     sciences = ["{}/{}{:04}d.fits".format(twd,rb,i) for i in scinums]
     scicrrs = ["{}/{}{:04}dcrr.fits".format(twd,rb,i) for i in scinums]
     scicrrfs = ["{}/{}{:04}dcrrf.fits".format(twd,rb,i) for i in scinums]
+    long_arcs = ["{}/{}{:04}d.fits".format(twd,rb,i) for i in longarcnums]
+    short_arcs = ["{}/{}{:04}d.fits".format(twd,rb,i) for i in shortarcnums]
     
     n1_flats = ["{}/{}{:04}d.fits".format(twd,rb,i) for i in n1_flatnum]
     n2_flats = ["{}/{}{:04}d.fits".format(twd,rb,i) for i in n2_flatnum]
@@ -115,15 +119,111 @@ if __name__ == "__main__":
     # Without a milky flat, it seems best to just extract the object without applying the flat.
     # Then after also extracting the flat, then divide the 1D spectra.
     # There's no need to do this in 2D!
-
-    # Find extraction profile from flat
-    m2fs_reduction_pipeline.m2fs_ghlb_profile(mflatfname, tracefname, tracestdfname, fibermapfname,
-                                              x_begin, x_end)
-    
     ## Coadd
     #m2fs_reduction_pipeline.m2fs_imcombine(scicrrfs, os.path.join(twd, "science_{}_dcf.fits".format(rb)))
     # TODO the better way is to simultaneously fit this out of the individual frames
     #dcfws is the final one
+    
+    ## Find extraction profile from trace/flat
+    #m2fs_reduction_pipeline.m2fs_ghlb_profile(mflatfname, tracefname, tracestdfname, fibermapfname,
+    #                                          x_begin, x_end)
+    
+    ## Use GHLB flat profile to extract arcs
+    datafname,flatfname,fibermapfname = long_arcs[0], mflatfname, fibermapfname
+    data, edata, hdata = read_fits_two(datafname)
+    nx,ny = data.shape
+    fibmap = np.loadtxt(fibermapfname)
+    ntrace = fibmap.size
+    nobjs, norder  = fibmap.shape
+    
+    outdir = os.path.dirname(flatfname)
+    outname = os.path.basename(flatfname)[:-5]
+    fname_fitparams = os.path.join(outdir,outname+"_ghlb_fitparams.txt")
+    fname_allyarr = os.path.join(outdir,outname+"_ghlb_yarr.npy")
+    #fname_alldatarr = os.path.join(outdir,outname+"_ghlb_data.npy")
+    #fname_allerrarr = os.path.join(outdir,outname+"_ghlb_errs.npy")
+    fitparams = np.loadtxt(fname_fitparams)
+    allyarr = np.load(fname_allyarr).astype(int)
+    Nextract = allyarr.shape[1]
+    
+    assert fitparams.shape[0] == ntrace
+    assert allyarr.shape[0] == ntrace
+    
+    # Generate valid pixels: could do this in a more refined way
+    xarrlist = [np.arange(nx) for i in range(norder)]
+    xarrlist[0] = np.arange(nx-x_begin)+x_begin
+    xarrlist[-1] = np.arange(x_end)
+
+    # for each trace, pull out yarr from the data
+    onedarcs = np.zeros((ntrace,nx))
+    for itrace in range(ntrace):
+        xarr = xarrlist[itrace % norder]
+        yarr = allyarr[itrace][:,xarr]
+        darr = np.array([data[xarr,_yarr] for _yarr in yarr])
+        # simply collapse for now, though could do something better if needed
+        onedarcs[itrace,xarr] = np.sum(darr, axis=0)
+    # if a feature is similar strength across all orders for one object, it is definitely saturated
+    # use this to construct a mask manually
+    maskranges = [(22,33),(74,90),(232,245),(364,377),(425,437),(605,620),
+                  (700,712),(770,785),(1048,1065),(1110,1141),(1315,1335),
+                  (1373,1400),(1471,1500),(1629,1647),(1823,1855)]
+    refobj = 12
+    mask = np.zeros_like(onedarcs, dtype=bool)
+    for mr in maskranges:
+        mask[(refobj*norder):(refobj+1)*norder,mr[0]:mr[1]] = True
+    refmask = mask[refobj*norder]
+    maskarcs = onedarcs.copy()
+    maskarcs[mask] = np.nan
+    refarcs = onedarcs[(refobj*norder):(refobj+1)*norder,:]
+    refarcs = refarcs - np.nanmedian(refarcs,axis=0)
+    
+    # For each spectrum, find the offset that will give the best 
+    import matplotlib.pyplot as plt
+    fig, axes = plt.subplots(nobjs//2, 2, figsize=(16,4*nobjs/2))
+    corrarr = np.zeros((ntrace,nx))
+    for iobj in range(nobjs):
+        ax = axes.flat[iobj]
+        ax.set_title(str(iobj))
+        # this is the slice
+        iy1, iy2 = iobj*norder, (iobj+1)*norder
+        for iorder in range(norder):
+            xarr = xarrlist[iorder]
+            y = onedarcs[iy1+iorder,xarr]
+            y = y - np.nanmean(y)
+            # cross correlate
+            xmid = np.arange(len(xarr))-len(xarr)//2
+
+            #xshifts = np.arange(-100,100)
+            #corr = np.zeros(len(xshifts))
+            #refarc = refarcs[iorder,xarr]
+            #yshift = np.zeros(len(xarr))
+            #for icorr,xshift in enumerate(xshifts):
+            #    yshift[:] = 0.
+            #    if xshift < 0:
+            #        yshift[0:(len(xarr)+xshift)] = y[-xshift:len(xarr)]
+            #    elif xshift == 0:
+            #        yshift = y
+            #    elif xshift > 0:
+            #        yshift[xshift:len(xarr)] = y[0:(len(xarr)-xshift)]
+            #    # mask
+            #    yshift[refmask[xarr]] = 0.
+            #    corr[icorr] = np.nansum(yshift*refarc)
+            corr = signal.correlate(y,refarcs[iorder,xarr],"same")
+            #ax.plot(xarr, maskarcs[iy1+iorder,xarr], lw=.5)
+                #if iorder==1:
+            #ax.plot(xshifts, corr, lw=.5)
+            ax.plot(xmid,corr)
+            #corrarr[iobj*norder + iorder, xarr] = corr
+            
+    fig.savefig("test.png",dpi=300)
+    
+    # load default 
+    # find peaks in each
+    #signal.find_peakws_cwt(onedarcs[itrace], [widths])
+    #def find_peaks(y):
+    #    pass
+    # default wavelength solution for specific fibers
+    
     
 def tmp():
     ## wavelength calibration

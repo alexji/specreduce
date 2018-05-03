@@ -6,6 +6,7 @@ import glob, os, sys, time
 
 from scipy import optimize, signal, ndimage, special, linalg
 from astropy.io import fits
+from astropy.stats import biweight
 
 from m2fs_utils import mrdfits, read_fits_two, write_fits_two, m2fs_load_files_two
 from m2fs_utils import gaussfit, jds_poly_reject, m2fs_extract1d

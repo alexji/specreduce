@@ -44,6 +44,9 @@ def m2fs_load_files_two(fnames):
         headers.append(h)
     return imgarr, imgerrarr, headers
 
+#def m2fs_extract_ghlb(datafname,flatfname):
+    
+
 def m2fs_extract1d(data, tracecoef, id, yaper=7, method="sum"):
     nx = data.shape[0]
     ypeak = np.polyval(tracecoef[id], np.arange(nx))

@@ -4,6 +4,7 @@ from __future__ import (division, print_function, absolute_import,
 import numpy as np
 from astropy.io import fits
 from scipy import optimize
+import re
 
 def mrdfits(fname, ext):
     """ Read fits file """
@@ -315,3 +316,110 @@ def m2fs_4amp(infile):
     #hdulist = fits.HDUList([hdu1, hdu2])
     #hdulist.writeto(outfile, overwrite=True)
     write_fits_two(outfile, outim.T, outerr.T, h1)
+
+def make_multispec(outfname, bands, bandids, header=None):
+    assert len(bands) == len(bandids)
+    Nbands = len(bands)
+    # create output image array
+    # Note we have to reverse the order of axes in a fits file
+    shape = bands[0].shape
+    output = np.zeros((Nbands, shape[1], shape[0]))
+    for k, (band, bandid) in enumerate(zip(bands, bandids)):
+        output[k] = band.T
+    if Nbands == 1:
+        output = output[0]
+        klist = [1,2]
+        wcsdim = 2
+    else:
+        klist = [1,2,3]
+        wcsdim = 3
+    
+    hdu = fits.PrimaryHDU(output)
+    header = hdu.header
+    for k in klist:
+        header.append(("CDELT"+str(k), 1.))
+        header.append(("CD{}_{}".format(k,k), 1.))
+        header.append(("LTM{}_{}".format(k,k), 1))
+        header.append(("CTYPE"+str(k), "MULTISPE"))
+    header.append(("WCSDIM", wcsdim))
+    for k, bandid in enumerate(bandids):
+        header.append(("BANDID{}".format(k+1), bandid))
+    # Do not fill in wavelength/WAT2 yet
+    
+    hdulist = fits.HDUList([hdu])
+    hdulist.writeto(outfname, overwrite=True)
+
+def parse_idb(fname):
+    with open(fname) as fp:
+        lines = fp.readlines()
+    istarts = []
+    for i,line in enumerate(lines):
+        if line.startswith("begin"): istarts.append(i)
+    Nlines = len(lines)
+    Naper = len(istarts)
+    
+    iranges = []
+    for j in range(Naper):
+        if j == Naper-1: iranges.append((istarts[j],Nlines))
+        else: iranges.append((istarts[j],istarts[j+1]))
+    output = {}
+    for j in range(Naper):
+        data = lines[iranges[j][0]:iranges[j][1]]
+        out = {}
+        Nskip = 0
+        for i, line in enumerate(data):
+            if Nskip > 0:
+                Nskip -= 1
+                continue
+            s = line.split()
+            try:
+                key = s[0]
+                value = s[1]
+            except IndexError:
+                continue
+            if key == "begin": pass
+            elif key in ["id", "task","units","function"]:
+                out[key] = value
+            elif key == "image":
+                out[key] = " ".join(s[1:])
+            elif key in ["aperture","order","naverage","niterate"]:
+                out[key] = int(value)
+            elif key in ["aplow","aphigh","low_reject","high_reject","grow"]:
+                out[key] = float(value)
+            elif key in ["features"]:
+                Nfeatures = int(value)
+                Nskip = Nfeatures
+                linelist = list(map(lambda x: list(map(float, x.split()[:6])), data[(i+1):(i+1+Nfeatures)]))
+                out["features"] = np.array(linelist)
+            elif key in ["coefficients"]:
+                Ncoeff = int(value)
+                Nskip = Ncoeff
+                coeffarr = list(map(float, data[i+1:i+1+Ncoeff]))
+                out["coefficients"] = np.array(coeffarr)
+        if "aperture" in out:
+            aperture = out["aperture"]
+        else:
+            im = out["image"]
+            aperture = int(re.findall(r".*\[\*,(\d+)\]", im)[0])
+        output[aperture]=out
+
+    return output
+
+def calc_wave(x, coeffs):
+    # only supports legendre poly right now
+    functype, order, xmin, xmax = coeffs[0:4]
+    coeffs = coeffs[4:]
+    assert functype == 2, functype
+    assert order == len(coeffs), (order, len(coeffs))
+    if order > 5:
+        print("Cutting order down to 5 from {}".format(order))
+        order = 5
+        coeffs = coeffs[:5]
+    #if x is None:
+    #    x = np.arange(int(np.ceil(xmin)), int(np.floor(xmax)))
+    #else:
+    #    assert np.all(np.logical_and(x >= xmin, x <= xmax))
+    
+    xn = (2*x - (xmax+xmin))/(xmax-xmin)
+    wl = np.polynomial.legendre.legval(xn, coeffs)
+    return wl

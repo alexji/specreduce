@@ -280,7 +280,7 @@ def m2fs_ghlb_profile(fname, tracefname, tracestdfname, fibermapfname,
     fname_allyarr = os.path.join(outdir,outname+"_ghlb_yarr.npy")
     fname_alldatarr = os.path.join(outdir,outname+"_ghlb_data.npy")
     fname_allerrarr = os.path.join(outdir,outname+"_ghlb_errs.npy")
-
+    
     Nparam=Nleg*Ngh
     
     data, edata, header = read_fits_two(fname)
@@ -298,6 +298,7 @@ def m2fs_ghlb_profile(fname, tracefname, tracestdfname, fibermapfname,
     # For each order, fit spatial profile to the full trace simultaneously
     # Following Kelson ghlb.pdf
     # But fitting each fiber separately in some specified extraction region
+    # rather than solving for the distortion functions
     
     # Go 1 pixel further on each side, ensure an odd number
     Nextract = int(dy)+4 + int(int(dy) % 2 == 0)

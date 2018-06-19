@@ -2,7 +2,7 @@
 File name: reduce_m2fs.py
 Author: Alex Ji (based on code by T.T. Hansen and J.D. Simon)
 Date Created: 4/24/2018
-Date last modified: 5/1/2018
+Date last modified: 6/19/2018
 """
 
 from __future__ import (division, print_function, absolute_import,
@@ -13,11 +13,13 @@ import glob, os, sys, time
 from importlib import reload
 from scipy import optimize, signal, ndimage, special, linalg
 
-from astropy.io import fits
+from astropy.io import fits, ascii
+from astropy.stats import biweight_location, biweight_scale
 
 from m2fs_utils import mrdfits, read_fits_two, write_fits_two, m2fs_load_files_two
 from m2fs_utils import gaussfit, jds_poly_reject, m2fs_extract1d
 from m2fs_utils import m2fs_4amp
+from m2fs_utils import make_multispec, parse_idb, calc_wave
 
 import m2fs_reduction_pipeline; reload(m2fs_reduction_pipeline)
 
@@ -78,7 +80,7 @@ if __name__ == "__main__":
     scinums = n1_scinum + n2_scinum
     longarcnums = [1412,1415,1421,1429,1433,1566,1572,1576,1580,1584]
     shortarcnums = [1413,1416,1422,1430,1434,1567,1573,1577,1581,1585]
-        
+    
     darks = ["{}/{}{:04}.fits".format(rwd,rb,i) for i in darknums]
     flats = ["{}/{}{:04}d.fits".format(twd,rb,i) for i in flatnums]
     sciences = ["{}/{}{:04}d.fits".format(twd,rb,i) for i in scinums]
@@ -96,6 +98,9 @@ if __name__ == "__main__":
     n1_scicrrfs = ["{}/{}{:04}dcrrf.fits".format(twd,rb,i) for i in n1_scinum]
     n2_scicrrfs = ["{}/{}{:04}dcrrf.fits".format(twd,rb,i) for i in n2_scinum]
     
+    linelist = ascii.read("bulgegc1_longarc.dat")
+
+#def tmp():
     ## Bias subtraction and trimming
     #m2fs_biastrim(rwd)
     ## Make master darks and subtract
@@ -105,13 +110,16 @@ if __name__ == "__main__":
     #m2fs_reduction_pipeline.m2fs_make_master_flat(flats, mflatfname)
     #m2fs_reduction_pipeline.m2fs_make_master_flat(n1_flats, n1_mflatfname)
     #m2fs_reduction_pipeline.m2fs_make_master_flat(n2_flats, n2_mflatfname)
-    ## Trace Flat
+    ## Trace Flat 
     #m2fs_reduction_pipeline.m2fs_trace_orders(mflatfname, expected_fibers)
     #m2fs_reduction_pipeline.m2fs_trace_orders(n1_mflatfname, expected_fibers)
     #m2fs_reduction_pipeline.m2fs_trace_orders(n2_mflatfname, expected_fibers)
     ## Remove cosmic rays from science frames, using all frames from a given night
     #m2fs_reduction_pipeline.m2fs_remove_cosmics(n1_scis)
     #m2fs_reduction_pipeline.m2fs_remove_cosmics(n2_scis)
+    
+    
+    
     ## Apply flat to science frames
     #m2fs_reduction_pipeline.m2fs_flat(scicrrs, mflatfname, tracefname, fibermapfname,
     #                                  x_begin=x_begin, x_end=x_end)
@@ -121,14 +129,127 @@ if __name__ == "__main__":
     # There's no need to do this in 2D!
     ## Coadd
     #m2fs_reduction_pipeline.m2fs_imcombine(scicrrfs, os.path.join(twd, "science_{}_dcf.fits".format(rb)))
+    #m2fs_reduction_pipeline.m2fs_imcombine(scicrrs, os.path.join(twd, "science_{}_dc.fits".format(rb)))
     # TODO the better way is to simultaneously fit this out of the individual frames
     #dcfws is the final one
     
     ## Find extraction profile from trace/flat
     #m2fs_reduction_pipeline.m2fs_ghlb_profile(mflatfname, tracefname, tracestdfname, fibermapfname,
-    #                                          x_begin, x_end)
+    #                                          x_begin, x_end, make_plot=True)
     
-    ## Use GHLB flat profile to extract arcs
+    ## Run extraction
+
+    fname = scicrrs[0]
+    #fname = os.path.join(twd, "science_{}_dc.fits".format(rb))
+    flatfname = mflatfname
+    
+    outdir = os.path.dirname(fname)
+    outname = os.path.basename(fname)[:-5]
+    multispec_name = os.path.join(outdir,outname+".ms.fits")    
+
+    flatoutdir = os.path.dirname(flatfname)
+    flatoutname = os.path.basename(flatfname)[:-5]
+    fname_fitparams = os.path.join(flatoutdir,flatoutname+"_ghlb_fitparams.txt")
+    fname_allyarr = os.path.join(flatoutdir,flatoutname+"_ghlb_yarr.npy")
+    fname_allflatdatarr = os.path.join(outdir,flatoutname+"_ghlb_data.npy")
+    fname_allflaterrarr = os.path.join(outdir,flatoutname+"_ghlb_errs.npy")
+    allflatdatarr = np.load(fname_allflatdatarr)
+    allflaterrarr = np.load(fname_allflaterrarr)
+    
+    # Load the frame the extract
+    data, edata, header = read_fits_two(fname)
+    nx, ny = data.shape
+    fibmap = np.loadtxt(fibermapfname)
+    # Load information about fibers
+    npeak, norder = fibmap.shape
+    xarrlist = [np.arange(nx) for i in range(norder)]
+    xarrlist[0] = np.arange(nx-x_begin)+x_begin
+    xarrlist[-1] = np.arange(x_end)
+
+    fitparams = np.loadtxt(fname_fitparams) # GHLB fit to profile: not using right now
+    wavecalparams = parse_idb("idb1421d.ms.txt") # Wavelength calibration
+    
+    # Use trace information to extract relevant 2d arrays into alldatarr and allerrarr
+    start = time.time()
+    allyarr = np.load(fname_allyarr).astype(int) # trace info
+    npeak, Nextract, nx = allyarr.shape
+    alldatarr = np.full((npeak,nx,Nextract), np.nan)
+    allerrarr = np.full((npeak,nx,Nextract), np.nan)
+    # Do a simple sum and horne extraction while we're at it
+    allspecsum  = np.full((npeak,nx), np.nan)
+    allerrssum  = np.full((npeak,nx), np.nan)
+    allspecwsum = np.full((npeak,nx), np.nan)
+    allspecwerr = np.full((npeak,nx), np.nan)
+    allflatdatsum = np.full((npeak,nx), np.nan)
+    allwave     = np.full((npeak,nx), np.nan)
+    allspechorne= np.full((npeak,nx), np.nan)
+    allprofhorne= np.full((npeak,nx,Nextract), np.nan)
+    allerrshorne= np.full((npeak,nx), np.nan)
+    for ipeak in range(npeak):
+        xarr = xarrlist[ipeak % norder]
+        yarr = allyarr[ipeak,:,xarr]
+        for j, jx in enumerate(xarr):
+            alldatarr[ipeak,jx,:] =  data[jx,yarr[j]]
+            allerrarr[ipeak,jx,:] = edata[jx,yarr[j]]
+        # Wave calibration
+        coeffs = wavecalparams[ipeak+1]["coefficients"]
+        allwave[ipeak, xarr] = calc_wave(xarr, coeffs)
+        # Simple sum
+        allspecsum[ipeak,:] = np.sum(alldatarr[ipeak],axis=1)
+        allerrssum[ipeak,:] = np.sqrt(np.sum(allerrarr[ipeak]**2,axis=1))
+        # Use flat to compute profile for Horne extraction
+        flat = allflatdatarr[ipeak]
+        flat = (flat.T/np.sum(flat,axis=1)).T # normalize at each x
+        allprofhorne[ipeak] = flat
+        ivar = allerrarr[ipeak]**-2.
+        flux = alldatarr[ipeak]
+        horneflux = np.sum(flat * flux * ivar, axis=1)/np.sum(flat * flat * ivar, axis=1)
+        horneerrs = np.sqrt(np.sum(flat, axis=1)/np.sum(flat * flat * ivar, axis=1))
+        allspechorne[ipeak] = horneflux
+        allerrshorne[ipeak] = horneerrs
+    print("Following trace and simple extraction took {:.1f}s".format(time.time()-start))
+    
+    make_multispec(multispec_name, [allspecsum.T, allerrssum.T, allspechorne.T, allerrshorne.T, allwave.T, allprofhorne.T], ["sum flux","sum errs","horne flux","horne errs","wave","flat"])
+    
+    import matplotlib.pyplot as plt
+    Nrow, Ncol = fibmap.shape
+    fig1, axes1 = plt.subplots(Nrow,Ncol,figsize = (Ncol*6,Nrow*2.5))
+    fig2, axes2 = plt.subplots(Nrow,Ncol,figsize = (Ncol*6,Nrow*2.5))
+    fig3, axes3 = plt.subplots(Nrow,Ncol,figsize = (Ncol*6,Nrow*2.5))
+    fig4, axes4 = plt.subplots(Nrow,Ncol,figsize = (Ncol*6,Nrow*2.5))
+    fig5, axes5 = plt.subplots(Nrow,Ncol,figsize = (Ncol*6,Nrow*2.5))
+    fig6, axes6 = plt.subplots(Nrow,Ncol,figsize = (Ncol*6,Nrow*2.5))
+    vmin1, vmax1 = np.nanpercentile(alldatarr, [1,95])
+    for ipeak, (ax1,ax2,ax3,ax4,ax5,ax6) in \
+            enumerate(zip(axes1.flat, axes2.flat, axes3.flat, 
+                          axes4.flat, axes5.flat, axes6.flat)):
+        z = alldatarr[ipeak]
+        im = ax1.imshow(z.T, origin='lower', aspect='auto', vmin=vmin1, vmax=vmax1)
+        z = alldatarr[ipeak]/allflatdatarr[ipeak]
+        vmin2, vmax2 = np.nanpercentile(z, [.1,90])
+        im = ax2.imshow(z.T, origin='lower', aspect='auto', vmin=vmin2, vmax=vmax2)
+        ## Simple sum extraction
+        ax3.plot(allwave[ipeak],allspecsum[ipeak],color='k',lw=.5)
+        ## Simple weighted mean extraction
+        ax4.plot(allwave[ipeak],allspecwsum[ipeak],color='k',lw=.5)
+        ## Simple weighted mean SNR
+        ax5.plot(allwave[ipeak],allspecwsum[ipeak]/allspecwerr[ipeak],color='k',lw=.5)
+        # Horne extraction
+        ax6.plot(allwave[ipeak],allspechorne[ipeak],color='k',lw=.5)
+    fig1.savefig("test_extract1.png", bbox_inches="tight")
+    fig2.savefig("test_extract2.png", bbox_inches="tight")
+    fig3.savefig("test_extract3.png", bbox_inches="tight")
+    fig4.savefig("test_extract4.png", bbox_inches="tight")
+    fig5.savefig("test_extract5.png", bbox_inches="tight")
+    fig6.savefig("test_extract6.png", bbox_inches="tight")
+    plt.close(fig1); plt.close(fig2); plt.close(fig3); plt.close(fig4); plt.close(fig5); plt.close(fig6)
+    
+    #plt.show()
+
+def extract_arcs():
+#if __name__=="__main__":
+    """ Pull out arc multispec """
+    ## extract arcs
     datafname,flatfname,fibermapfname = long_arcs[0], mflatfname, fibermapfname
     data, edata, hdata = read_fits_two(datafname)
     nx,ny = data.shape
@@ -136,12 +257,14 @@ if __name__ == "__main__":
     ntrace = fibmap.size
     nobjs, norder  = fibmap.shape
     
-    outdir = os.path.dirname(flatfname)
-    outname = os.path.basename(flatfname)[:-5]
-    fname_fitparams = os.path.join(outdir,outname+"_ghlb_fitparams.txt")
-    fname_allyarr = os.path.join(outdir,outname+"_ghlb_yarr.npy")
-    #fname_alldatarr = os.path.join(outdir,outname+"_ghlb_data.npy")
-    #fname_allerrarr = os.path.join(outdir,outname+"_ghlb_errs.npy")
+    outdir = os.path.dirname(datafname)
+    outname= os.path.basename(datafname)[:-5]
+    flatoutdir = os.path.dirname(flatfname)
+    flatoutname = os.path.basename(flatfname)[:-5]
+    fname_fitparams = os.path.join(flatoutdir,flatoutname+"_ghlb_fitparams.txt")
+    fname_allyarr = os.path.join(flatoutdir,flatoutname+"_ghlb_yarr.npy")
+    #fname_alldatarr = os.path.join(flatoutdir,flatoutname+"_ghlb_data.npy")
+    #fname_allerrarr = os.path.join(flatoutdir,flatoutname+"_ghlb_errs.npy")
     fitparams = np.loadtxt(fname_fitparams)
     allyarr = np.load(fname_allyarr).astype(int)
     Nextract = allyarr.shape[1]
@@ -162,25 +285,21 @@ if __name__ == "__main__":
         darr = np.array([data[xarr,_yarr] for _yarr in yarr])
         # simply collapse for now, though could do something better if needed
         onedarcs[itrace,xarr] = np.sum(darr, axis=0)
-    # if a feature is similar strength across all orders for one object, it is definitely saturated
-    # use this to construct a mask manually
-    maskranges = [(22,33),(74,90),(232,245),(364,377),(425,437),(605,620),
-                  (700,712),(770,785),(1048,1065),(1110,1141),(1315,1335),
-                  (1373,1400),(1471,1500),(1629,1647),(1823,1855)]
+    onedarcs = onedarcs - np.nanmedian(onedarcs, axis=0)
+    make_multispec(os.path.join(outdir,outname+".ms.fits"), [onedarcs.T], ["lamp spectrum"])
     refobj = 12
-    mask = np.zeros_like(onedarcs, dtype=bool)
-    for mr in maskranges:
-        mask[(refobj*norder):(refobj+1)*norder,mr[0]:mr[1]] = True
-    refmask = mask[refobj*norder]
-    maskarcs = onedarcs.copy()
-    maskarcs[mask] = np.nan
     refarcs = onedarcs[(refobj*norder):(refobj+1)*norder,:]
-    refarcs = refarcs - np.nanmedian(refarcs,axis=0)
+    #refarcs = refarcs - np.nanmedian(refarcs,axis=0)
     
+    ## Used IRAF identify to get wavelength solutions
+    
+    
+def tmp():
     # For each spectrum, find the offset that will give the best 
     import matplotlib.pyplot as plt
     fig, axes = plt.subplots(nobjs//2, 2, figsize=(16,4*nobjs/2))
     corrarr = np.zeros((ntrace,nx))
+    offsets = np.zeros(ntrace)
     for iobj in range(nobjs):
         ax = axes.flat[iobj]
         ax.set_title(str(iobj))
@@ -190,36 +309,170 @@ if __name__ == "__main__":
             xarr = xarrlist[iorder]
             y = onedarcs[iy1+iorder,xarr]
             y = y - np.nanmean(y)
-            # cross correlate
+            # cross correlate. Doesn't seem to care about saturated lines
             xmid = np.arange(len(xarr))-len(xarr)//2
-
-            #xshifts = np.arange(-100,100)
-            #corr = np.zeros(len(xshifts))
-            #refarc = refarcs[iorder,xarr]
-            #yshift = np.zeros(len(xarr))
-            #for icorr,xshift in enumerate(xshifts):
-            #    yshift[:] = 0.
-            #    if xshift < 0:
-            #        yshift[0:(len(xarr)+xshift)] = y[-xshift:len(xarr)]
-            #    elif xshift == 0:
-            #        yshift = y
-            #    elif xshift > 0:
-            #        yshift[xshift:len(xarr)] = y[0:(len(xarr)-xshift)]
-            #    # mask
-            #    yshift[refmask[xarr]] = 0.
-            #    corr[icorr] = np.nansum(yshift*refarc)
             corr = signal.correlate(y,refarcs[iorder,xarr],"same")
-            #ax.plot(xarr, maskarcs[iy1+iorder,xarr], lw=.5)
-                #if iorder==1:
-            #ax.plot(xshifts, corr, lw=.5)
-            ax.plot(xmid,corr)
-            #corrarr[iobj*norder + iorder, xarr] = corr
+            l, = ax.plot(xmid,corr)
+            corrarr[iobj*norder + iorder, xarr] = corr
+            imax = np.argmax(corr)
+            out = gaussfit(xmid,corr,[np.max(corr),xmid[imax],10])
+            ax.set_ylim(ax.get_ylim())
+            ax.plot([out[1],out[1]],ax.get_ylim(),color='k',lw=1)
+            offsets[iobj*norder+iorder] = out[1]
             
-    fig.savefig("test.png",dpi=300)
+    fig.savefig("correlation.png",dpi=300)
+    plt.close(fig)
     
-    # load default 
-    # find peaks in each
-    #signal.find_peakws_cwt(onedarcs[itrace], [widths])
+    # My ThArNe arcs are highly saturated in the red (even for the short exposures).
+    # So I need to mask out the saturated Ne lines.
+    # If a feature is similar strength across all orders for one object, it is from saturated overspilling
+    # Use this to construct a mask manually for the 90s arcs.
+    maskranges = [(22,33),(74,90),(232,245),(259,270),(364,377),(425,437),(605,620),
+                  (700,712),(770,785),(1048,1065),(1110,1141),(1315,1335),
+                  (1373,1400),(1471,1500),(1611,1620),(1629,1654),(1823,1855)]
+    mask = np.zeros_like(onedarcs, dtype=bool)
+    for mr in maskranges:
+        for itrace, offset in enumerate(offsets):
+            mr0 = int(mr[0]+offset)
+            mr1 = int(mr[1]+offset)
+            mask[itrace,mr0:mr1] = True
+    maskarcs = onedarcs.copy()
+    maskarcs[mask] = np.nan
+    fig, ax = plt.subplots()
+    plt.imshow(maskarcs,origin='lower',aspect='auto')
+    plt.colorbar()
+    fig.savefig("maskarcs.png")
+    plt.close(fig)
+    
+    # find peak locations
+    all_peak_locations = []
+    fig, axes = plt.subplots(nobjs, norder, figsize=(8*norder,3*nobjs))
+    for itrace in range(ntrace):
+        iorder = itrace % norder
+        iobj = int(itrace/norder)
+        xarr = xarrlist[iorder]
+        yarr = maskarcs[itrace][xarr]
+        
+        mask = np.isnan(yarr)
+        yarr[mask] = 0.
+        yarr = yarr - ndimage.filters.median_filter(yarr, 100)
+        yarr[mask] = 0.
+        
+        dyarr = np.gradient(yarr)
+        noise = biweight_scale(yarr)
+        thresh = 10. * noise
+        
+        this_linelist = linelist[linelist["order"] == iorder+1]
+        w0s = this_linelist["wavetrue"]
+        x0s = this_linelist["X"] + offsets[itrace]
+        
+        ii1 = yarr > thresh
+        ii2 = dyarr >= 0
+        ii3 = np.zeros_like(ii2)
+        ii3[:-1] = dyarr[1:] < 0
+        peaklocs = ii1 & ii2 & ii3
+        peaklocs[mask] = False
+        peakindices = np.where(peaklocs)[0]
+        numpeaks = peaklocs.sum()
+        print("{:3}: noise={:.3f}, {} peaks".format(itrace, noise, numpeaks))
+        peak_locations = []
+        window = 5 # pixel window for fitting peak location
+        maxpixdiff = 17 # pixel window for matching to a line
+        for ipeak, ix in enumerate(peakindices):
+            _xx = xarr[ix-window:ix+window+1]
+            _yy = yarr[ix-window:ix+window+1]
+            xloc = xarr[ix]
+            guess = [yarr[ix],xloc,2,0.]
+            try:
+                popt = gaussfit(_xx,_yy,guess)
+            except (RuntimeError, TypeError):
+                print("       Failed to fit trace {} line {}/{} at {}".format(itrace, ipeak, numpeaks, xloc))
+                continue
+            if np.abs(xloc-popt[1]) > 3 or popt[0] < 0:
+                print("       Bad fit for trace {} line {}/{} at {}".format(itrace, ipeak, numpeaks, xloc))
+                continue
+            closest_line = np.argmin(np.abs(x0s - popt[1]))
+            x0 = x0s[closest_line]
+            w0 = w0s[closest_line]
+            if np.abs(x0-popt[1]) > maxpixdiff:
+                print("       Bad line match for trace {} line {}/{} at {}: w0={:.1f} x0={:.1f} fit={:.1f}".format(itrace, ipeak, numpeaks, xloc, w0, x0, popt[1]))
+                continue
+            peak_locations.append((xloc, x0, w0, popt[1], popt[0], popt[2]))
+        ax = axes[iobj, iorder]
+        ax.plot(xarr, yarr, lw=.7)
+        for loc in peak_locations:
+            ax.axvline(loc[1],color='r', lw=.3)
+            ax.axvline(loc[3],color='b', lw=.3)
+        all_peak_locations.append(peak_locations)
+        for x0 in x0s:
+            ax.axvline(x0, 0,.1, color='k', lw=.3)
+        for mr in maskranges:
+            mr0 = int(mr[0]+offsets[itrace])
+            mr1 = int(mr[1]+offsets[itrace])
+            ax.axvspan(mr0,mr1,0,1,color='grey',alpha=.3)
+        ax.set_xlim(xarr[0],xarr[-1])
+
+    fig.savefig("arcmatch.pdf", bbox_inches="tight")
+    print(list(map(len, all_peak_locations)))
+
+    # find line locations in each trace
+    #all_line_locations = []
+    #for itrace in range(ntrace):
+    #    iorder = itrace % norder
+    #    iobj = int(itrace/norder)
+    #    xarr = xarrlist[iorder]
+    #    yarr = maskarcs[itrace][xarr]
+    #    
+    #    # Set masked regions to 0, subtract continuum
+    #    yarr[np.isnan(yarr)] = 0.
+    #    yarr = yarr - ndimage.filters.median_filter(yarr, 100)
+    #
+    #    this_linelist = linelist[linelist["order"] == iorder+1]
+    #    offset = offsets[itrace]
+    #    # Find the actual location of each line
+    #    line_locations = []
+    #    for iline, line in enumerate(this_linelist):
+    #        # Initial guess
+    #        x0 = offset + line["X"]
+    #        w0 = line["wavetrue"]
+    #        ibest = np.argmin(np.abs(x0-xarr))
+    #        try:
+    #            popt = gaussfit(xarr,yarr,[yarr[ibest], x0, 2.])
+    #        except RuntimeError:
+    #            print("Failed to fit trace {} line {}".format(itrace, iline))
+    #            line_locations.append((w0,x0,np.nan))
+    #        else:
+    #            line_locations.append((w0,x0,popt[1]))
+    #    all_line_locations.append(line_locations)
+    #
+    #    ax = axes[iobj, iorder]
+    #    ax.plot(xarr, yarr, lw=1)
+    #    for loc in line_locations:
+    #        if np.abs(loc[2]-loc[1]) < 5:
+    #            ax.axvline(loc[1],color='r', lw=.5)
+    #            ax.axvline(loc[2],color='b', lw=.5)
+    #fig.savefig("arcmatch.pdf", bbox_inches="tight")
+    
+    # Get a 0th order wavelength solution as initialization.
+    # This is calculated for refobj manually in IRAF.
+    #wavelength_solution_iraf = np.load("wavelength_solution_iraf_{}.npy".format(rb))
+    
+    
+
+    # widths=[
+    #signal.find_peaks_cwt(onedarcs[itrace], [widths])
+    #fig,axes = plt.subplots(6,figsize=(8,12))
+    #for i in range(6):
+    #    ax = axes[i]
+    #    xarr = xarrlist[i]
+    #    ax.plot(xarr, maskarcs[i,xarr], lw=1)
+    #    peaks = signal.find_peaks_cwt(maskarcs[i,xarr],range(4,10))
+    #    peaks2 = signal.find_peaks_cwt(maskarcs[i,xarr],range(20,30))
+    #    if i == 0: peaks += min(xarr)
+    #    ax.vlines(peaks-1,0,2e5,color='k',linewidth=.5)
+    #    ax.vlines(peaks2-1,0,2e5,color='r',linewidth=.5)
+    #    ax.set_ylim(-1e3,1e5)
+    #plt.show()
     #def find_peaks(y):
     #    pass
     # default wavelength solution for specific fibers

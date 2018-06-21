@@ -57,8 +57,12 @@ if __name__ == "__main__":
     elif rb == "b":
         expected_fibers = 144
         fibermapfname = "fibermap_blue.txt"
-        x_begin = 900
+        # Start and end of the first and last orders
+        x_begin = 775
         x_end = 1300
+        # Littrow Ghost
+        badcolmin = 1000
+        badcolmax = 1300
     else:
         raise ValueError(rb)
     rwd = "../raw"
@@ -66,6 +70,7 @@ if __name__ == "__main__":
     
     mdarkfname = "{}/mdark_{}.fits".format(twd,rb)
     mflatfname = "{}/mflat_{}.fits".format(twd,rb)
+    mflatscatfname = "{}/mflat_{}_scat.fits".format(twd,rb)
     tracefname = "{}/mflat_{}_tracecoeff.txt".format(twd,rb)
     tracestdfname = "{}/mflat_{}_tracestdcoeff.txt".format(twd,rb)
     n1_mflatfname = "{}/n1_mflat_{}.fits".format(twd,rb)
@@ -85,7 +90,8 @@ if __name__ == "__main__":
     flats = ["{}/{}{:04}d.fits".format(twd,rb,i) for i in flatnums]
     sciences = ["{}/{}{:04}d.fits".format(twd,rb,i) for i in scinums]
     scicrrs = ["{}/{}{:04}dcrr.fits".format(twd,rb,i) for i in scinums]
-    scicrrfs = ["{}/{}{:04}dcrrf.fits".format(twd,rb,i) for i in scinums]
+    scicrrss = ["{}/{}{:04}dcrr_scat.fits".format(twd,rb,i) for i in scinums]
+    #scicrrfs = ["{}/{}{:04}dcrrf.fits".format(twd,rb,i) for i in scinums]
     long_arcs = ["{}/{}{:04}d.fits".format(twd,rb,i) for i in longarcnums]
     short_arcs = ["{}/{}{:04}d.fits".format(twd,rb,i) for i in shortarcnums]
     
@@ -95,8 +101,10 @@ if __name__ == "__main__":
     n2_scis = ["{}/{}{:04}d.fits".format(twd,rb,i) for i in n2_scinum]
     n1_scicrrs = ["{}/{}{:04}dcrr.fits".format(twd,rb,i) for i in n1_scinum]
     n2_scicrrs = ["{}/{}{:04}dcrr.fits".format(twd,rb,i) for i in n2_scinum]
-    n1_scicrrfs = ["{}/{}{:04}dcrrf.fits".format(twd,rb,i) for i in n1_scinum]
-    n2_scicrrfs = ["{}/{}{:04}dcrrf.fits".format(twd,rb,i) for i in n2_scinum]
+    n1_scicrrss = ["{}/{}{:04}dcrr_scat.fits".format(twd,rb,i) for i in n1_scinum]
+    n2_scicrrss = ["{}/{}{:04}dcrr_scat.fits".format(twd,rb,i) for i in n2_scinum]
+    #n1_scicrrfs = ["{}/{}{:04}dcrrf.fits".format(twd,rb,i) for i in n1_scinum]
+    #n2_scicrrfs = ["{}/{}{:04}dcrrf.fits".format(twd,rb,i) for i in n2_scinum]
     
     linelist = ascii.read("bulgegc1_longarc.dat")
 
@@ -110,43 +118,43 @@ if __name__ == "__main__":
     #m2fs_reduction_pipeline.m2fs_make_master_flat(flats, mflatfname)
     #m2fs_reduction_pipeline.m2fs_make_master_flat(n1_flats, n1_mflatfname)
     #m2fs_reduction_pipeline.m2fs_make_master_flat(n2_flats, n2_mflatfname)
-    ## Trace Flat 
-    #m2fs_reduction_pipeline.m2fs_trace_orders(mflatfname, expected_fibers)
-    #m2fs_reduction_pipeline.m2fs_trace_orders(n1_mflatfname, expected_fibers)
-    #m2fs_reduction_pipeline.m2fs_trace_orders(n2_mflatfname, expected_fibers)
     ## Remove cosmic rays from science frames, using all frames from a given night
     #m2fs_reduction_pipeline.m2fs_remove_cosmics(n1_scis)
     #m2fs_reduction_pipeline.m2fs_remove_cosmics(n2_scis)
     
-    
-    
-    ## Apply flat to science frames
-    #m2fs_reduction_pipeline.m2fs_flat(scicrrs, mflatfname, tracefname, fibermapfname,
-    #                                  x_begin=x_begin, x_end=x_end)
-    # TODO why can't I just divide one by the other? Because there's lots of 0s.
-    # Without a milky flat, it seems best to just extract the object without applying the flat.
-    # Then after also extracting the flat, then divide the 1D spectra.
-    # There's no need to do this in 2D!
-    ## Coadd
-    #m2fs_reduction_pipeline.m2fs_imcombine(scicrrfs, os.path.join(twd, "science_{}_dcf.fits".format(rb)))
-    #m2fs_reduction_pipeline.m2fs_imcombine(scicrrs, os.path.join(twd, "science_{}_dc.fits".format(rb)))
-    # TODO the better way is to simultaneously fit this out of the individual frames
-    #dcfws is the final one
+    ## Trace Flat 
+    #m2fs_reduction_pipeline.m2fs_trace_orders(mflatfname, expected_fibers)
+    #m2fs_reduction_pipeline.m2fs_trace_orders(n1_mflatfname, expected_fibers)
+    #m2fs_reduction_pipeline.m2fs_trace_orders(n2_mflatfname, expected_fibers)
     
     ## Find extraction profile from trace/flat
+    ## I am not currently using the GHLB fit profile, instead just the empirical profile
+    ## But this does pull out the extraction regions so still has to be run.
     #m2fs_reduction_pipeline.m2fs_ghlb_profile(mflatfname, tracefname, tracestdfname, fibermapfname,
     #                                          x_begin, x_end, make_plot=True)
     
-    ## Run extraction
+    ## Subtract scattered light
+    #m2fs_reduction_pipeline.m2fs_scatlight(mflatfname, mflatfname, fibermapfname, x_begin, x_end, badcolmin, badcolmax)
+    #for fname in scicrrs:
+    #    m2fs_reduction_pipeline.m2fs_scatlight(fname, mflatfname, fibermapfname, x_begin, x_end, badcolmin, badcolmax)
 
-    fname = scicrrs[0]
+    ## Rerun GHLB to fit profiles but after subtracting scattered light
+    #m2fs_reduction_pipeline.m2fs_ghlb_profile(mflatscatfname, tracefname, tracestdfname, fibermapfname,
+    #                                          x_begin, x_end, make_plot=True)
+    
+
+def extract(fname, flatfname, fibermapfname, wavecalfname, x_begin, x_end):
+#if __name__=="__main__":
+    ## Run extraction
+    #fname = scicrrss[0]
     #fname = os.path.join(twd, "science_{}_dc.fits".format(rb))
-    flatfname = mflatfname
+    #flatfname = mflatscatfname
+    #wavecalfname = "idb1421d.ms.txt"
     
     outdir = os.path.dirname(fname)
     outname = os.path.basename(fname)[:-5]
     multispec_name = os.path.join(outdir,outname+".ms.fits")    
-
+    
     flatoutdir = os.path.dirname(flatfname)
     flatoutname = os.path.basename(flatfname)[:-5]
     fname_fitparams = os.path.join(flatoutdir,flatoutname+"_ghlb_fitparams.txt")
@@ -165,9 +173,9 @@ if __name__ == "__main__":
     xarrlist = [np.arange(nx) for i in range(norder)]
     xarrlist[0] = np.arange(nx-x_begin)+x_begin
     xarrlist[-1] = np.arange(x_end)
-
+    
     fitparams = np.loadtxt(fname_fitparams) # GHLB fit to profile: not using right now
-    wavecalparams = parse_idb("idb1421d.ms.txt") # Wavelength calibration
+    wavecalparams = parse_idb(wavecalfname) # Wavelength calibration
     
     # Use trace information to extract relevant 2d arrays into alldatarr and allerrarr
     start = time.time()
@@ -185,6 +193,7 @@ if __name__ == "__main__":
     allspechorne= np.full((npeak,nx), np.nan)
     allprofhorne= np.full((npeak,nx,Nextract), np.nan)
     allerrshorne= np.full((npeak,nx), np.nan)
+    allflat     = np.full((npeak,nx), np.nan)
     for ipeak in range(npeak):
         xarr = xarrlist[ipeak % norder]
         yarr = allyarr[ipeak,:,xarr]
@@ -198,57 +207,89 @@ if __name__ == "__main__":
         allspecsum[ipeak,:] = np.sum(alldatarr[ipeak],axis=1)
         allerrssum[ipeak,:] = np.sqrt(np.sum(allerrarr[ipeak]**2,axis=1))
         # Use flat to compute profile for Horne extraction
+        # TODO use the GHLB profile here instead?
         flat = allflatdatarr[ipeak]
-        flat = (flat.T/np.sum(flat,axis=1)).T # normalize at each x
-        allprofhorne[ipeak] = flat
+        allflat[ipeak,:] = np.sum(flat, axis=1) # sum flat profile along extraction aperture
+        # Do not normalize to preserve throughput information
+        # allflat[ipeak,:] = allflat[ipeak,:]/np.nanpercentile(allflat[ipeak,:],90) 
+        flat = (flat.T/np.sum(flat,axis=1)).T # normalize at each wavelength for Horne
+        allprofhorne[ipeak] = flat # Hmm this does not account for throughput corrections
         ivar = allerrarr[ipeak]**-2.
         flux = alldatarr[ipeak]
         horneflux = np.sum(flat * flux * ivar, axis=1)/np.sum(flat * flat * ivar, axis=1)
         horneerrs = np.sqrt(np.sum(flat, axis=1)/np.sum(flat * flat * ivar, axis=1))
         allspechorne[ipeak] = horneflux
         allerrshorne[ipeak] = horneerrs
-    print("Following trace and simple extraction took {:.1f}s".format(time.time()-start))
+    print("Following trace and simple extraction took {:.1f}s for {}".format(time.time()-start, fname))
     
-    make_multispec(multispec_name, [allspecsum.T, allerrssum.T, allspechorne.T, allerrshorne.T, allwave.T, allprofhorne.T], ["sum flux","sum errs","horne flux","horne errs","wave","flat"])
+    allspecsumflat = allspecsum/allflat
+    allerrssumflat = allerrssum/allflat
+    allspechorneflat = allspechorne/allflat
+    allerrshorneflat = allerrshorne/allflat
     
-    import matplotlib.pyplot as plt
-    Nrow, Ncol = fibmap.shape
-    fig1, axes1 = plt.subplots(Nrow,Ncol,figsize = (Ncol*6,Nrow*2.5))
-    fig2, axes2 = plt.subplots(Nrow,Ncol,figsize = (Ncol*6,Nrow*2.5))
-    fig3, axes3 = plt.subplots(Nrow,Ncol,figsize = (Ncol*6,Nrow*2.5))
-    fig4, axes4 = plt.subplots(Nrow,Ncol,figsize = (Ncol*6,Nrow*2.5))
-    fig5, axes5 = plt.subplots(Nrow,Ncol,figsize = (Ncol*6,Nrow*2.5))
-    fig6, axes6 = plt.subplots(Nrow,Ncol,figsize = (Ncol*6,Nrow*2.5))
-    vmin1, vmax1 = np.nanpercentile(alldatarr, [1,95])
-    for ipeak, (ax1,ax2,ax3,ax4,ax5,ax6) in \
-            enumerate(zip(axes1.flat, axes2.flat, axes3.flat, 
-                          axes4.flat, axes5.flat, axes6.flat)):
-        z = alldatarr[ipeak]
-        im = ax1.imshow(z.T, origin='lower', aspect='auto', vmin=vmin1, vmax=vmax1)
-        z = alldatarr[ipeak]/allflatdatarr[ipeak]
-        vmin2, vmax2 = np.nanpercentile(z, [.1,90])
-        im = ax2.imshow(z.T, origin='lower', aspect='auto', vmin=vmin2, vmax=vmax2)
-        ## Simple sum extraction
-        ax3.plot(allwave[ipeak],allspecsum[ipeak],color='k',lw=.5)
-        ## Simple weighted mean extraction
-        ax4.plot(allwave[ipeak],allspecwsum[ipeak],color='k',lw=.5)
-        ## Simple weighted mean SNR
-        ax5.plot(allwave[ipeak],allspecwsum[ipeak]/allspecwerr[ipeak],color='k',lw=.5)
-        # Horne extraction
-        ax6.plot(allwave[ipeak],allspechorne[ipeak],color='k',lw=.5)
-    fig1.savefig("test_extract1.png", bbox_inches="tight")
-    fig2.savefig("test_extract2.png", bbox_inches="tight")
-    fig3.savefig("test_extract3.png", bbox_inches="tight")
-    fig4.savefig("test_extract4.png", bbox_inches="tight")
-    fig5.savefig("test_extract5.png", bbox_inches="tight")
-    fig6.savefig("test_extract6.png", bbox_inches="tight")
-    plt.close(fig1); plt.close(fig2); plt.close(fig3); plt.close(fig4); plt.close(fig5); plt.close(fig6)
+    make_multispec(multispec_name, [allspecsum.T, allerrssum.T, allspecsumflat.T, allerrssumflat.T,
+                                    allspechorne.T, allerrshorne.T, allspechorneflat.T, allerrshorneflat.T,
+                                    allwave.T, allflat.T], 
+                   ["sum flux","sum errs","sum flat","sum flaterr",
+                    "horne flux","horne errs","horne flat","horne flaterr",
+                    "wave","flat"])
     
-    #plt.show()
+#    import matplotlib.pyplot as plt
+#    Nrow, Ncol = fibmap.shape
+#    fig1, axes1 = plt.subplots(Nrow,Ncol,figsize = (Ncol*6,Nrow*2.5))
+#    fig2, axes2 = plt.subplots(Nrow,Ncol,figsize = (Ncol*6,Nrow*2.5))
+#    fig3, axes3 = plt.subplots(Nrow,Ncol,figsize = (Ncol*6,Nrow*2.5))
+#    fig4, axes4 = plt.subplots(Nrow,Ncol,figsize = (Ncol*6,Nrow*2.5))
+#    fig5, axes5 = plt.subplots(Nrow,Ncol,figsize = (Ncol*6,Nrow*2.5))
+#    fig6, axes6 = plt.subplots(Nrow,Ncol,figsize = (Ncol*6,Nrow*2.5))
+#    vmin1, vmax1 = np.nanpercentile(alldatarr, [1,95])
+#    for ipeak, (ax1,ax2,ax3,ax4,ax5,ax6) in \
+#            enumerate(zip(axes1.flat, axes2.flat, axes3.flat, 
+#                          axes4.flat, axes5.flat, axes6.flat)):
+#        z = alldatarr[ipeak]
+#        im = ax1.imshow(z.T, origin='lower', aspect='auto', vmin=vmin1, vmax=vmax1)
+#        z = alldatarr[ipeak]/allflatdatarr[ipeak]
+#        vmin2, vmax2 = np.nanpercentile(z, [.1,90])
+#        im = ax2.imshow(z.T, origin='lower', aspect='auto', vmin=vmin2, vmax=vmax2)
+#        ## Simple sum extraction
+#        ax3.plot(allwave[ipeak],allspecsum[ipeak],color='k',lw=.5)
+#        ## Simple weighted mean extraction
+#        ax4.plot(allwave[ipeak],allspecwsum[ipeak],color='k',lw=.5)
+#        ## Simple weighted mean SNR
+#        ax5.plot(allwave[ipeak],allspecwsum[ipeak]/allspecwerr[ipeak],color='k',lw=.5)
+#        # Horne extraction
+#        ax6.plot(allwave[ipeak],allspechorne[ipeak],color='k',lw=.5)
+#    fig1.savefig("test_extract1.png", bbox_inches="tight")
+#    fig2.savefig("test_extract2.png", bbox_inches="tight")
+#    fig3.savefig("test_extract3.png", bbox_inches="tight")
+#    fig4.savefig("test_extract4.png", bbox_inches="tight")
+#    fig5.savefig("test_extract5.png", bbox_inches="tight")
+#    fig6.savefig("test_extract6.png", bbox_inches="tight")
+#    #plt.close(fig1); plt.close(fig2); plt.close(fig3); plt.close(fig4); plt.close(fig5); plt.close(fig6)
+#    
+#    plt.show()
+
+    ## Apply flat to science frames
+    #m2fs_reduction_pipeline.m2fs_flat(scicrrs, mflatfname, tracefname, fibermapfname,
+    #                                  x_begin=x_begin, x_end=x_end)
+    # TODO why can't I just divide one by the other? Because there's lots of 0s.
+    # Without a milky flat, it seems best to just extract the object without applying the flat.
+    # Then after also extracting the flat, then divide the 1D spectra.
+    # There's no need to do this in 2D!
+    ## Coadd
+    #m2fs_reduction_pipeline.m2fs_imcombine(scicrrfs, os.path.join(twd, "science_{}_dcf.fits".format(rb)))
+    #m2fs_reduction_pipeline.m2fs_imcombine(scicrrs, os.path.join(twd, "science_{}_dc.fits".format(rb)))
+    # TODO the better way is to simultaneously fit this out of the individual frames
+    #dcfws is the final one
+    
+
+if __name__ == "__main__":
+    for fname in scicrrss:
+        extract(fname, mflatscatfname, fibermapfname, "idb1421d.ms.txt", x_begin, x_end)
+
 
 def extract_arcs():
-#if __name__=="__main__":
-    """ Pull out arc multispec """
+    """ Pull out arc multispec (used for IRAF identify) """
     ## extract arcs
     datafname,flatfname,fibermapfname = long_arcs[0], mflatfname, fibermapfname
     data, edata, hdata = read_fits_two(datafname)
@@ -477,34 +518,6 @@ def tmp():
     #    pass
     # default wavelength solution for specific fibers
     
-    
-def tmp():
-    ## wavelength calibration
-    yaper=7.     #                                 ; aperture for collapsing 2D arc spectrum to 1D
-    degree=4     #                               ; degree of wavelength solution
-    nthresh=10.0 #;orig=10                                  ; N times above the stddev of the 1D spectrum
-    saturation=30000.0 #                           ; saturation level to remove saturated lines
-    dx=10        #                                 ; width of x window for gaussian fit to find line center
-    px=17.0      #                                 ; pixrange for picking out peaks with known lambda values, change this is central wavelenght not right, ie because outer peaks are not found
-    
-    # read in fibermap and trace
-    # read arc frame
-    nfib = len(tracecoefs)
-    wavecoefs = np.zeros((degree, nfib))
-    rms = np.zeros(nfib)
-    # read in lines <-> pixels done manually from IRAF
-    
-    # extract one set of orders to use for cross correlation
-    # Use biweight mean of things in the aperture
-    
-    # for each fiber:
-    #   extract the arc spectrum to 1D
-    #   <apply a mask if needed>
-    #   remove continuum
-    #   find peaks
-    #   cross correlate to get offset from original orders
-    #   match peaks to pix list/lambda
-    #   fit wavelength solution, remove bad lines manually
     
 
 def terese():

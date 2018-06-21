@@ -12,6 +12,12 @@ from m2fs_utils import mrdfits, read_fits_two, write_fits_two, m2fs_load_files_t
 from m2fs_utils import gaussfit, jds_poly_reject, m2fs_extract1d
 from m2fs_utils import m2fs_4amp
 
+def m2fs_get_xarrlist(nx, norder, x_begin, x_end):
+    xarrlist = [np.arange(nx) for i in range(norder)]
+    xarrlist[0] = np.arange(nx-x_begin)+x_begin
+    xarrlist[-1] = np.arange(x_end)
+    return xarrlist
+
 def m2fs_make_master_dark(filenames, outfname, exptime=3600., corners_only=False):
     """
     Make a master dark by taking the median of all dark frames
@@ -269,17 +275,18 @@ def m2fs_trace_orders(fname, expected_fibers,
 def m2fs_ghlb_profile(fname, tracefname, tracestdfname, fibermapfname,
                       x_begin, x_end,
                       dy=5, legorder=6, ghorder=10,
-                      make_plot=True):
+                      make_plot=True, suffix=""):
     """ Use the same dy as in m2fs_trace_orders """
     Nleg = legorder + 1
     Ngh = ghorder + 1
 
     outdir = os.path.dirname(fname)
-    outname = os.path.basename(fname)[:-5]
+    outname = os.path.basename(fname)[:-5]+suffix
     fname_fitparams = os.path.join(outdir,outname+"_ghlb_fitparams.txt")
     fname_allyarr = os.path.join(outdir,outname+"_ghlb_yarr.npy")
     fname_alldatarr = os.path.join(outdir,outname+"_ghlb_data.npy")
     fname_allerrarr = os.path.join(outdir,outname+"_ghlb_errs.npy")
+    fname_allprofiles = os.path.join(outdir,outname+"_ghlb_profiles.npy")
     
     Nparam=Nleg*Ngh
     
@@ -310,7 +317,6 @@ def m2fs_ghlb_profile(fname, tracefname, tracestdfname, fibermapfname,
     fitparams = np.zeros((npeak,Nleg*Ngh))
     alldatarr = np.full((npeak,nx,Nextract), np.nan)
     allerrarr = np.full((npeak,nx,Nextract), np.nan)
-    # Plotting saves
     allfitarr = np.full((npeak,nx,Nextract), np.nan)
     for ipeak in range(npeak):
         # Initialize peak locations, widths, and data arrays
@@ -363,11 +369,12 @@ def m2fs_ghlb_profile(fname, tracefname, tracestdfname, fibermapfname,
         fitparams[ipeak] = pfit
         fity = pfit.dot(Xarr.T).reshape(Nxarr,Nextract)
         allfitarr[ipeak][xarr,:] = fity
-    print("Total took {:.1f}s".format(time.time()-start))
+    print("GHLB took {:.1f}s".format(time.time()-start))
     np.savetxt(fname_fitparams,fitparams)
     np.save(fname_allyarr,allyarr)
     np.save(fname_alldatarr,alldatarr)
     np.save(fname_allerrarr,allerrarr)
+    np.save(fname_allprofiles,allfitarr)
 
     if make_plot:
         import matplotlib.pyplot as plt
@@ -514,3 +521,155 @@ def m2fs_imcombine(scifnames, outfname):
     print("Combined science frames to {}".format(outfname))
     print("TODO: fix header!!!")
     write_fits_two(outfname, scisum, scierr, sciheaders[0])
+
+
+def m2fs_scatlight(fname, flatfname, fibermapfname, x_begin, x_end, badcolmin, badcolmax, degree=3, maxiter=9, sigmathresh=5.0,
+                   make_plot=True, extrapixels=2, verbose=True):
+    """
+    Scattered light subtraction.
+    The basic idea is to mask out the defined extraction regions in the 2D image,
+    then fit a 2D legendre polynomial to the rest of the pixels.
+    
+    This is a bit tricky because our extraction regions won't be perfect, and there
+    is the littrow ghost. So we do some outlier rejection on the full 2D array.
+    
+    Required arguments:
+    fname: data to fit scattered light to
+    outfname: where to write data that has scattered light subtracted
+    flatfname: flat used for tracing (used to mask)
+    badcolmin, badcolmax: x values to cut for removing the littrow ghost
+    
+    Optional arguments:
+    degree: legendre polynomial basis degree (default 3)
+    maxiter: maximum number of iterations for rejecting outlier pixels (default 9)
+    sigmathresh: threshold for rejecting outlier pixels (default 5.0)
+    make_plot: create plot showing residual from scattered light fit
+    extrapixels: extra pixels to mask in the y direction (default +/-2)
+    """
+    start = time.time()
+    
+    # read in file to subtract scattered light
+    print("Subtracting scattered light from {}".format(fname))
+    outdir = os.path.dirname(fname)
+    outname = os.path.basename(fname)[:-5]
+    outfname = os.path.join(outdir, outname+"_scat.fits")
+    data, edata, header = read_fits_two(fname)
+    
+    # read in trace and extraction pixels, determined from flat
+    flatoutdir = os.path.dirname(flatfname)
+    flatoutname = os.path.basename(flatfname)[:-5]
+    fname_allyarr = os.path.join(flatoutdir,flatoutname+"_ghlb_yarr.npy")
+    allyarr = np.load(fname_allyarr).astype(int) # trace info
+    npeak, Nextract, nx = allyarr.shape
+    
+    # read in fibermap and generate valid pixels for each order
+    fibmap = np.loadtxt(fibermapfname)
+    nobj, norder = fibmap.shape
+    npeak = nobj * norder
+    xarrlist = [np.arange(nx) for i in range(norder)]
+    xarrlist[0] = np.arange(nx-x_begin)+x_begin
+    xarrlist[-1] = np.arange(x_end)
+    
+    # Read in flat and nan out extraction regions
+    # The rest are good pixels for fitting scattered light
+    scatlight = data.copy()
+    for ipeak in range(npeak):
+        xarr = xarrlist[ipeak % norder]
+        for j in range(Nextract):
+            yarr = allyarr[ipeak,j,xarr]
+            scatlight[xarr,yarr] = np.nan
+        # Expand the masking range a bit
+        for extra in range(1,extrapixels+1):
+            yarr = allyarr[ipeak,0,xarr] - extra
+            scatlight[xarr,yarr] = np.nan
+            yarr = allyarr[ipeak,Nextract-1,xarr] + extra
+            scatlight[xarr,yarr] = np.nan
+    # Just kidding, have to cut the Littrow ghost out too
+    _scatlight = scatlight.copy()
+    _scatlight[badcolmin:badcolmax,:] = np.nan
+    #scatlight[badcolmin:badcolmax,:] = np.nan
+    #_scatlight = scatlight.copy()
+    
+    # Fit 2d legendre polynomial to scattered light pixels
+    # Iteratively clip outliers. Have to do this to not fit to the ghosts.
+    # First set up the normalized x and y grid
+    nx, ny = scatlight.shape
+    def normalize(x):
+        """ Linearly scale from -1 to 1 """
+        x = np.array(x)
+        nx = len(x)
+        xmin, xmax = x.min(), x.max()
+        xhalf = (x.max()-x.min())/2.
+        return (x-xhalf)/xhalf
+    xn = normalize(np.arange(nx))
+    yn = normalize(np.arange(ny))
+    XN, YN = np.meshgrid(xn, yn, indexing='ij')
+    # Cut to finite pixels
+    finite = np.isfinite(scatlight)
+    _XN = XN[finite].ravel()
+    _YN = YN[finite].ravel()
+    _scatlight = _scatlight[finite].ravel()
+    _scatlightfit = np.full_like(_scatlight, np.nanmedian(_scatlight)) # initialize fit to constant
+    Noutliertotal = 0
+    for iter in range(maxiter):
+        # Clip outlier pixels
+        resid = _scatlight - _scatlightfit
+        mu = np.nanmedian(resid)
+        sigma = np.nanstd(resid)
+        iinotoutlier = np.logical_and(resid < mu + sigmathresh*sigma, resid > mu - sigmathresh*sigma)
+        Noutlier = np.sum(~iinotoutlier)
+        if verbose: print("  m2fs_scatlight: Iter {} removed {} pixels".format(iter, Noutlier))
+        if Noutlier == 0: break
+        Noutliertotal += Noutlier
+        _XN = _XN[iinotoutlier]
+        _YN = _YN[iinotoutlier]
+        _scatlight = _scatlight[iinotoutlier]
+        # Fit scattered light model
+        xypoly = np.polynomial.legendre.legvander2d(_XN, _YN, [degree,degree])
+        coeff = np.linalg.lstsq(xypoly, _scatlight, rcond=-1)[0]
+        # Evaluate the scattered light model
+        _scatlightfit = xypoly.dot(coeff)
+    scatlightpoly = np.polynomial.legendre.legvander2d(XN.ravel(), YN.ravel(), [degree,degree])
+    scatlightfit = (scatlightpoly.dot(coeff)).reshape((nx,ny))
+    
+    data = data - scatlightfit
+    header.add_history("m2fs_scatlight: subtracted scattered light")
+    header.add_history("m2fs_scatlight: degree=".format(degree))
+    header.add_history("m2fs_scatlight: removed littrow x={}-{}".format(badcolmin,badcolmax))
+    header.add_history("m2fs_scatlight: removed {} outlier pixels".format(Noutliertotal))
+    write_fits_two(outfname, data, edata, header)
+    print("Wrote to {}".format(outfname))
+    print("m2fs_scatlight took {:.1f}s".format(time.time()-start))
+    
+    if make_plot:
+        import matplotlib.pyplot as plt
+        fig2 = plt.figure(figsize=(8,8))
+        im = plt.imshow(scatlightfit.T, origin='lower', aspect='auto', interpolation='none')
+        plt.axvline(badcolmin,lw=1,color='k',linestyle=':')
+        plt.axvline(badcolmax,lw=1,color='k',linestyle=':')
+        plt.title("Scattered light fit (deg={}, max={})".format(degree,np.nanmax(scatlightfit)))
+        plt.colorbar()
+        outpre = outdir+"/"+outname
+        fig2.savefig(outpre+"_scatlight_fit.png",bbox_inches='tight')
+        fig3 = plt.figure(figsize=(8,8))
+        resid = scatlight-scatlightfit
+        minresid = np.nanpercentile(resid,.1)
+        im = plt.imshow(resid.T, origin='lower', aspect='auto', cmap='coolwarm',
+                        vmin=minresid, vmax=abs(minresid), interpolation='none')
+        plt.axvline(badcolmin,lw=1,color='k',linestyle=':')
+        plt.axvline(badcolmax,lw=1,color='k',linestyle=':')
+        plt.title("Scattered Light Residual (median = {:.2f})".format(np.nanmedian(resid)))
+        plt.colorbar()
+        fig3.savefig(outpre+"_scatlight_resid.png",bbox_inches='tight')
+        fig1 = plt.figure(figsize=(8,8))
+        residfrac = (scatlight-scatlightfit)/scatlight
+        minresid = np.nanpercentile(residfrac,.1)
+        im = plt.imshow(residfrac.T, origin='lower', aspect='auto', cmap='coolwarm',
+                        vmin=minresid, vmax=abs(minresid), interpolation='none')
+        plt.axvline(badcolmin,lw=1,color='k',linestyle=':')
+        plt.axvline(badcolmax,lw=1,color='k',linestyle=':')
+        plt.title("Scattered Light Relative Residual (med={:.2f})".format(np.nanmedian(residfrac)))
+        plt.colorbar()
+        fig1.savefig(outpre+"_scatlight_residfrac.png",bbox_inches='tight')
+        plt.close(fig1); plt.close(fig2); plt.close(fig3)
+    
